@@ -101,20 +101,18 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     }
 
     // --- NOVA ETAPA: VERIFICAR E CONVERTER HEIC ---
-    // Verifica se o ficheiro é HEIC/HEIF pelo tipo ou extensão
     if (file.type === 'image/heic' || file.type === 'image/heif' || file.name.toLowerCase().endsWith('.heic')) {
         try {
             btnText.textContent = 'Convertendo imagem...';
             const convertedBlob = await heic2any({
                 blob: file,
                 toType: "image/jpeg",
-                quality: 0.8, // Qualidade da conversão
+                quality: 0.8,
             });
-            // Cria um novo ficheiro a partir do resultado da conversão
             file = new File([convertedBlob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", { type: "image/jpeg" });
         } catch (error) {
             console.error('Erro ao converter HEIC:', error);
-            alert(`Ocorreu um erro ao converter a imagem do formato HEIC.\n\nDetalhes: ${error.message}\n\nPor favor, tente usar outra imagem.`);
+            alert(`Ocorreu um erro ao converter a imagem (formato HEIC).\n\nDetalhes: ${error.message}\n\nPor favor, tente usar outra imagem.`);
             submitBtn.disabled = false;
             btnSpinner.classList.add('d-none');
             btnText.textContent = 'Obter Localização e Registrar';
@@ -122,7 +120,7 @@ document.getElementById('checkinForm').addEventListener('submit', async function
         }
     }
     
-    // --- ETAPA DE COMPACTAÇÃO (agora com um ficheiro garantidamente compatível) ---
+    // --- ETAPA DE COMPACTAÇÃO ---
     let compressedFile;
     try {
         btnText.textContent = 'Compactando imagem...';
@@ -166,8 +164,11 @@ document.getElementById('checkinForm').addEventListener('submit', async function
                 if (response.redirected) {
                     window.location.href = response.url;
                 } else {
-                    alert('Ocorreu um erro inesperado no servidor.');
-                    submitBtn.disabled = false;
+                    response.text().then(text => { // Tenta ler a resposta do servidor em caso de erro
+                        console.error("Erro no servidor:", text);
+                        alert('Ocorreu um erro inesperado no servidor. Consulte a consola para mais detalhes.');
+                        submitBtn.disabled = false;
+                    });
                 }
             })
             .catch(err => {
