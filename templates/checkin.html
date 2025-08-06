@@ -126,7 +126,7 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     try {
         console.log("Iniciando compactação...");
         btnText.textContent = 'Compactando imagem...';
-        const options = { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: true };
+        const options = { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: false };
         compressedFile = await imageCompression(file, options);
         console.log("Compactação bem-sucedida. Ficheiro compactado:", compressedFile);
 
