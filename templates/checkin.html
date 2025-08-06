@@ -92,21 +92,41 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     btnSpinner.classList.remove('d-none');
     btnText.textContent = 'Processando Imagem...';
 
-    // ... (O código de conversão e compactação da imagem continua aqui, sem alterações)
+    // --- Processamento de Imagem (Conversão e Compactação) ---
     let file = imageInput.files[0];
-    if (!file) { alert('Selecione uma imagem.'); /* ...código de reset do botão... */ return; }
+    if (!file) {
+        alert('Por favor, selecione uma imagem.');
+        submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
+        return;
+    }
     if (file.type === 'image/heic' || file.type === 'image/heif' || file.name.toLowerCase().endsWith('.heic')) {
         try {
             const convertedBlob = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.8 });
             file = new File([convertedBlob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", { type: "image/jpeg" });
-        } catch (error) { console.error('Falha na conversão HEIC', error); alert(`Erro ao converter imagem: ${error.message}`); /* ...código de reset do botão... */ return; }
+        } catch (error) {
+            console.error('Falha na conversão HEIC', error);
+            alert(`Erro ao converter imagem: ${error.message}`);
+            submitBtn.disabled = false;
+            btnSpinner.classList.add('d-none');
+            btnText.textContent = 'Obter Localização e Registrar';
+            return;
+        }
     }
     let compressedFile;
     try {
         const options = { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: false };
         compressedFile = await imageCompression(file, options);
-    } catch (error) { console.error('Falha na compactação', error); alert(`Erro ao compactar imagem: ${error.message}`); /* ...código de reset do botão... */ return; }
-    // Fim do processamento de imagem
+    } catch (error) {
+        console.error('Falha na compactação', error);
+        alert(`Erro ao compactar imagem: ${error.message}`);
+        submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
+        return;
+    }
+    // --- Fim do Processamento de Imagem ---
 
     console.log("Processamento de imagem CONCLUÍDO. A iniciar geolocalização.");
     btnText.textContent = 'A obter localização...';
@@ -115,20 +135,23 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     if (!navigator.geolocation) {
         console.error("ERRO FATAL: navigator.geolocation NÃO EXISTE neste browser.");
         alert('Geolocalização não é suportada por este navegador.');
-        // ... (código de reset do botão) ...
+        submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
         return;
     }
 
-    // Verifica se o contexto é seguro (HTTPS)
     if (!window.isSecureContext) {
         console.error("ERRO FATAL: O contexto da página NÃO é seguro. Geolocation API desativada pelo browser.");
-        alert("Erro de Segurança: A geolocalização só funciona em páginas com HTTPS. Verifique se o seu site tem um certificado SSL válido e se não há conteúdo misto.");
-        // ... (código de reset do botão) ...
+        alert("Erro de Segurança Crítico: A página não é considerada 'segura' pelo browser, e a API de geolocalização foi desativada. Verifique o seu certificado SSL ou a existência de conteúdo misto (HTTP em página HTTPS).");
+        submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
         return;
     }
 
     const onGeoSuccess = (position) => {
-        console.log("SUCESSO na geolocalização! Coordenadas:", position.coords);
+        console.log("SUCESSO na geolocalização!", position.coords);
         document.getElementById('latitude').value = position.coords.latitude;
         document.getElementById('longitude').value = position.coords.longitude;
         
@@ -139,10 +162,14 @@ document.getElementById('checkinForm').addEventListener('submit', async function
         fetch(form.action, { method: 'POST', body: formData })
             .then(response => {
                 if (response.redirected) { window.location.href = response.url; } 
-                else { alert('Ocorreu um erro no servidor.'); }
+                else { alert('Ocorreu um erro inesperado no servidor.'); }
             })
             .catch(err => { alert('Erro de rede ao registar.'); })
-            .finally(() => { /* ...código de reset do botão... */ });
+            .finally(() => { 
+                submitBtn.disabled = false;
+                btnSpinner.classList.add('d-none');
+                btnText.textContent = 'Obter Localização e Registrar';
+             });
     };
 
     const onGeoError = (error) => {
@@ -150,13 +177,13 @@ document.getElementById('checkinForm').addEventListener('submit', async function
         let userMessage = 'Não foi possível obter a sua localização.\n\n';
         switch(error.code) {
             case error.PERMISSION_DENIED:
-                userMessage += "Causa: Você negou a permissão de localização para este site.";
+                userMessage += "Causa: A permissão de localização foi negada para este site.";
                 break;
             case error.POSITION_UNAVAILABLE:
-                userMessage += "Causa: A informação de localização não está disponível no momento (ex: sem sinal de GPS).";
+                userMessage += "Causa: A informação de localização não está disponível (sem sinal de GPS ou Wi-Fi).";
                 break;
             case error.TIMEOUT:
-                userMessage += "Causa: O pedido de localização expirou. Tente novamente num local com melhor sinal.";
+                userMessage += "Causa: O pedido de localização expirou. Tente novamente.";
                 break;
             default:
                 userMessage += "Causa: Ocorreu um erro desconhecido.";
@@ -169,10 +196,10 @@ document.getElementById('checkinForm').addEventListener('submit', async function
         btnText.textContent = 'Obter Localização e Registrar';
     };
 
-    console.log("A chamar navigator.geolocation.getCurrentPosition()...");
+    console.log("A chamar navigator.geolocation.getCurrentPosition() com opções...");
     navigator.geolocation.getCurrentPosition(onGeoSuccess, onGeoError, {
         enableHighAccuracy: true,
-        timeout: 15000, // 15 segundos de timeout
+        timeout: 15000, // 15 segundos
         maximumAge: 0
     });
 });
