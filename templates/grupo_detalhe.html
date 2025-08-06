@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2 class="mb-0"><i class="bi bi-pencil-square me-2"></i>Editando Grupo: {{ grupo.nome }}</h2>
+    <a href="{{ url_for('gerenciar_grupos') }}" class="btn btn-secondary">Voltar para Grupos</a>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card shadow-sm">
+            <div class="card-header"><h5 class="mb-0">Adicionar Novo Campo</h5></div>
+            <div class="card-body">
+                <form action="{{ url_for('add_campo', id=grupo.id) }}" method="POST">
+                    <div class="mb-3">
+                        <label for="label_campo" class="form-label">Nome do Campo (Ex: Venda Cartão)</label>
+                        <input type="text" class="form-control" id="label_campo" name="label_campo" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="tipo" class="form-label">Tipo do Campo</label>
+                        <select class="form-select" id="tipo" name="tipo" onchange="atualizarTamanho()">
+                            <option value="texto" selected>Texto</option>
+                            <option value="numero">Numérico</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="tamanho" class="form-label">Tamanho</label>
+                        <input type="number" class="form-control" id="tamanho" name="tamanho" min="1" value="200">
+                        <div class="form-text">Por padrão: Texto = 200, Numérico = 10. Pode alterar se necessário.</div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100">Adicionar Campo</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-8">
+        <div class="card shadow-sm">
+            <div class="card-header"><h5 class="mb-0">Campos Personalizados do Relatório</h5></div>
+            <div class="card-body">
+                <ul class="list-group">
+                    {% for campo in campos %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        {{ campo.label_campo }} 
+                        <small class="text-muted">({{ campo.tipo }} - tamanho {{ campo.tamanho }})</small>
+                        <form action="{{ url_for('delete_campo', campo_id=campo.id) }}" method="POST" 
+                              onsubmit="return confirm('Tem certeza que deseja apagar este campo?');" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                        </form>
+                    </li>
+                    {% else %}
+                    <li class="list-group-item text-center text-body-secondary">
+                        Nenhum campo personalizado definido para este grupo.
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function atualizarTamanho() {
+    const tipo = document.getElementById("tipo").value;
+    const tamanho = document.getElementById("tamanho");
+    if (tipo === "texto") {
+        tamanho.value = 200;
+    } else {
+        tamanho.value = 10;
+    }
+}
+</script>
+{% endblock %}
