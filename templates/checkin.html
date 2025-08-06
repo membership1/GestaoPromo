@@ -75,10 +75,11 @@
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 
 <script>
 document.getElementById('checkinForm').addEventListener('submit', async function(event) {
-    event.preventDefault(); // Impede o envio normal do formulário
+    event.preventDefault();
 
     const form = this;
     const submitBtn = document.getElementById('submitBtn');
@@ -86,58 +87,71 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     const btnSpinner = document.getElementById('btn-spinner');
     const imageInput = document.getElementById('imagem');
 
-    // Desativa o botão e mostra o spinner
     submitBtn.disabled = true;
     btnSpinner.classList.remove('d-none');
     btnText.textContent = 'Processando...';
 
-    // 1. Validar ficheiro
-    const file = imageInput.files[0];
+    let file = imageInput.files[0];
     if (!file) {
         alert('Por favor, selecione uma imagem.');
+        submitBtn.disabled = false;
         btnSpinner.classList.add('d-none');
         btnText.textContent = 'Obter Localização e Registrar';
-        // Não reativa o botão aqui, pois o formulário não deve ser enviado
         return;
     }
+
+    // --- NOVA ETAPA: VERIFICAR E CONVERTER HEIC ---
+    // Verifica se o ficheiro é HEIC/HEIF pelo tipo ou extensão
+    if (file.type === 'image/heic' || file.type === 'image/heif' || file.name.toLowerCase().endsWith('.heic')) {
+        try {
+            btnText.textContent = 'Convertendo imagem...';
+            const convertedBlob = await heic2any({
+                blob: file,
+                toType: "image/jpeg",
+                quality: 0.8, // Qualidade da conversão
+            });
+            // Cria um novo ficheiro a partir do resultado da conversão
+            file = new File([convertedBlob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", { type: "image/jpeg" });
+        } catch (error) {
+            console.error('Erro ao converter HEIC:', error);
+            alert(`Ocorreu um erro ao converter a imagem do formato HEIC.\n\nDetalhes: ${error.message}\n\nPor favor, tente usar outra imagem.`);
+            submitBtn.disabled = false;
+            btnSpinner.classList.add('d-none');
+            btnText.textContent = 'Obter Localização e Registrar';
+            return;
+        }
+    }
     
-    // 2. Tentar compactar a imagem
+    // --- ETAPA DE COMPACTAÇÃO (agora com um ficheiro garantidamente compatível) ---
     let compressedFile;
     try {
         btnText.textContent = 'Compactando imagem...';
         const options = {
           maxSizeMB: 1,
           maxWidthOrHeight: 1920,
-          useWebWorker: true,
-          // Adiciona um log para depuração
-          onProgress: (p) => { console.log(`Progresso da compactação: ${p}%`); }
+          useWebWorker: true
         }
         compressedFile = await imageCompression(file, options);
 
     } catch (error) {
-        // *** AQUI ESTÁ A MELHORIA PRINCIPAL ***
-        // Mostra uma mensagem de erro muito mais específica para o utilizador.
         console.error('Erro detalhado na compactação:', error);
-        alert(`Ocorreu um erro ao processar a sua imagem.\n\nDetalhes: ${error.message}\n\nPor favor, tente usar uma imagem diferente (formato JPG ou PNG) ou tire uma nova foto.`);
-        
-        // Mantém o botão desativado e reinicia o texto.
-        btnSpinner.classList.add('d-none');
-        btnText.textContent = 'Obter Localização e Registrar';
-        submitBtn.disabled = false; // Reativa o botão em caso de erro para nova tentativa
-        return; // Pára a execução
-    }
-
-    // 3. Obter a geolocalização
-    btnText.textContent = 'Obtendo localização...';
-    if (!navigator.geolocation) {
-        alert('Geolocalização não é suportada pelo seu navegador.');
-        btnSpinner.classList.add('d-none');
-        btnText.textContent = 'Obter Localização e Registrar';
+        alert(`Ocorreu um erro ao processar a sua imagem.\n\nDetalhes: ${error.message}`);
         submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
         return;
     }
 
-    // Funções de sucesso e erro da geolocalização
+    // --- ETAPA DE GEOLOCALIZAÇÃO E ENVIO ---
+    btnText.textContent = 'Obtendo localização...';
+    if (!navigator.geolocation) {
+        alert('Geolocalização não é suportada pelo seu navegador.');
+        submitBtn.disabled = false;
+        btnSpinner.classList.add('d-none');
+        btnText.textContent = 'Obter Localização e Registrar';
+        return;
+    }
+
     const onGeoSuccess = (position) => {
         document.getElementById('latitude').value = position.coords.latitude;
         document.getElementById('longitude').value = position.coords.longitude;
@@ -168,9 +182,9 @@ document.getElementById('checkinForm').addEventListener('submit', async function
 
     const onGeoError = () => {
         alert('Não foi possível obter sua localização. Verifique as permissões.');
+        submitBtn.disabled = false;
         btnSpinner.classList.add('d-none');
         btnText.textContent = 'Obter Localização e Registrar';
-        submitBtn.disabled = false;
     };
 
     navigator.geolocation.getCurrentPosition(onGeoSuccess, onGeoError);
