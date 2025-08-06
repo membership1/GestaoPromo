@@ -246,34 +246,73 @@ def enviar_imagem():
 @app.route('/checkin', methods=['GET', 'POST'])
 def checkin():
     if 'user_type' not in session or session['user_type'] != 'promotora': return redirect(url_for('login'))
+    
     db = get_db()
     cursor = db.cursor(cursor_factory=DictCursor)
     usuario_id = session['user_id']
     lojas_associadas = get_promotora_lojas(usuario_id)
+
     if not lojas_associadas:
         flash("Você não está associada a nenhuma loja para fazer check-in.", "warning")
+        # É importante fechar o cursor antes de renderizar
+        cursor.close()
         return render_template('checkin.html', lojas=[], registros=[])
+
     if request.method == 'POST':
-        loja_id_selecionada = request.form.get('loja_id')
-        tipo = request.form.get('tipo')
-        latitude = request.form.get('latitude')
-        longitude = request.form.get('longitude')
-        imagem_file = request.files.get('imagem')
-        if not all([loja_id_selecionada, tipo, imagem_file]):
-            flash('Todos os campos são obrigatórios.', 'warning')
-            return redirect(url_for('checkin'))
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        extensao = imagem_file.filename.rsplit('.', 1)[1].lower()
-        nome_arquivo = f"checkins/{tipo}_{usuario_id}_{timestamp}.{extensao}"
-        imagem_file.filename = secure_filename(nome_arquivo)
-        output = upload_file_to_s3(imagem_file, S3_BUCKET)
-        if "error" in output:
-            flash(f"Erro ao enviar imagem: {output['error']}", "danger")
-            return redirect(url_for('checkin'))
-        cursor.execute("INSERT INTO checkins (usuario_id, loja_id, tipo, data_hora, latitude, longitude, imagem_path) VALUES (%s, %s, %s, %s, %s, %s, %s)", (usuario_id, loja_id_selecionada, tipo, datetime.now(), latitude, longitude, imagem_file.filename))
-        db.commit()
-        flash(f'{tipo.capitalize()} registado com sucesso!', 'success')
+        try:
+            loja_id_selecionada = request.form.get('loja_id')
+            tipo = request.form.get('tipo')
+            
+            # --- CORREÇÃO PRINCIPAL AQUI ---
+            # Pega a latitude e longitude e converte strings vazias para None (NULL no DB)
+            latitude_str = request.form.get('latitude')
+            longitude_str = request.form.get('longitude')
+            
+            latitude = float(latitude_str) if latitude_str else None
+            longitude = float(longitude_str) if longitude_str else None
+            
+            imagem_file = request.files.get('imagem')
+
+            # Validação mais robusta
+            if not all([loja_id_selecionada, tipo, imagem_file]):
+                flash('É necessário selecionar uma loja, um tipo e uma imagem.', 'danger')
+                return redirect(url_for('checkin'))
+
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            extensao = imagem_file.filename.rsplit('.', 1)[1].lower()
+            nome_arquivo = f"checkins/{tipo}_{usuario_id}_{timestamp}.{extensao}"
+            imagem_file.filename = secure_filename(nome_arquivo)
+            
+            # Upload para o S3
+            output = upload_file_to_s3(imagem_file, S3_BUCKET)
+            if "error" in output:
+                flash(f"Erro ao enviar imagem: {output['error']}", "danger")
+                return redirect(url_for('checkin'))
+
+            # Inserção no banco de dados
+            sql = """
+                INSERT INTO checkins 
+                (usuario_id, loja_id, tipo, data_hora, latitude, longitude, imagem_path) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql, (usuario_id, loja_id_selecionada, tipo, datetime.now(), latitude, longitude, imagem_file.filename))
+            
+            db.commit()
+            flash(f'{tipo.capitalize()} registado com sucesso!', 'success')
+
+        except Exception as e:
+            # Captura qualquer erro, desfaz a operação e informa o utilizador
+            db.rollback()
+            print(f"ERRO AO GRAVAR CHECKIN: {e}") # Isto aparecerá nos logs da app
+            flash(f"Ocorreu um erro inesperado ao gravar o check-in: {e}", "danger")
+        
+        finally:
+            # Garante que o cursor é sempre fechado
+            cursor.close()
+
         return redirect(url_for('checkin'))
+
+    # Lógica para o método GET (quando a página é carregada)
     cursor.execute("SELECT c.*, l.razao_social FROM checkins c JOIN lojas l ON c.loja_id = l.id WHERE c.usuario_id = %s ORDER BY c.data_hora DESC", (usuario_id,))
     registros = cursor.fetchall()
     cursor.close()
