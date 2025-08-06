@@ -86,11 +86,11 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     const btnSpinner = document.getElementById('btn-spinner');
     const imageInput = document.getElementById('imagem');
 
-    // Desativa o botão para evitar múltiplos cliques
+    // Desativa o botão
     submitBtn.disabled = true;
     btnSpinner.classList.remove('d-none');
     
-    // 1. COMPACTAR A IMAGEM
+    // 1. Compactar a imagem
     const file = imageInput.files[0];
     if (!file) {
         alert('Por favor, selecione uma imagem.');
@@ -100,10 +100,9 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     }
     
     btnText.textContent = 'Compactando imagem...';
-    console.log(`Tamanho original: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
-
+    
     const options = {
-      maxSizeMB: 1, // Define o tamanho máximo para 1MB
+      maxSizeMB: 1,
       maxWidthOrHeight: 1920,
       useWebWorker: true
     }
@@ -111,7 +110,6 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     let compressedFile;
     try {
       compressedFile = await imageCompression(file, options);
-      console.log(`Tamanho compactado: ${(compressedFile.size / 1024 / 1024).toFixed(2)} MB`);
     } catch (error) {
       console.error('Erro na compactação:', error);
       alert('Ocorreu um erro ao compactar a imagem.');
@@ -121,7 +119,7 @@ document.getElementById('checkinForm').addEventListener('submit', async function
       return;
     }
 
-    // 2. OBTER A GEOLOCALIZAÇÃO
+    // 2. Obter a geolocalização
     btnText.textContent = 'Obtendo localização...';
     if (!navigator.geolocation) {
         alert('Geolocalização não é suportada pelo seu navegador.');
@@ -138,33 +136,36 @@ document.getElementById('checkinForm').addEventListener('submit', async function
     }
 
     function success(position) {
-        // 3. ENVIAR O FORMULÁRIO COM OS DADOS
+        // 3. Preencher coordenadas e enviar o formulário
         document.getElementById('latitude').value = position.coords.latitude;
         document.getElementById('longitude').value = position.coords.longitude;
         
-        // Cria um novo FormData para enviar o ficheiro compactado
         const formData = new FormData(form);
-        formData.set('imagem', compressedFile, compressedFile.name); // Substitui a imagem original pela compactada
+        formData.set('imagem', compressedFile, compressedFile.name);
         
-        // Envia os dados
+        btnText.textContent = 'Registrando...';
+
         fetch(form.action, {
             method: 'POST',
             body: formData
         }).then(response => {
-            // Se o envio for bem-sucedido, redireciona para a mesma página para ver o feedback (flash message)
-            if(response.ok) {
-                window.location.href = form.action;
+            // *** AQUI ESTÁ A CORREÇÃO PRINCIPAL ***
+            // Se a resposta for um redirecionamento, significa que o POST foi bem-sucedido.
+            if (response.redirected) {
+                window.location.href = response.url; // Segue o redirecionamento para recarregar a página
             } else {
-                 alert('Ocorreu um erro no servidor ao registrar.');
+                // Se não redirecionou, algo realmente deu errado no servidor.
+                alert('Ocorreu um erro inesperado no servidor.');
+                submitBtn.disabled = false;
+                btnSpinner.classList.add('d-none');
+                btnText.textContent = 'Obter Localização e Registrar';
             }
         }).catch(err => {
-            console.error('Erro no fetch:', err);
-            alert('Erro de rede ao tentar registrar.');
-        }).finally(() => {
-            // Reativa o botão em caso de erro
-            btnText.textContent = 'Obter Localização e Registrar';
-            btnSpinner.classList.add('d-none');
+            console.error('Erro de rede:', err);
+            alert('Erro de rede ao tentar registrar. Verifique sua conexão.');
             submitBtn.disabled = false;
+            btnSpinner.classList.add('d-none');
+            btnText.textContent = 'Obter Localização e Registrar';
         });
     }
 
