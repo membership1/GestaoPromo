@@ -24,6 +24,8 @@
 
             <div class="mb-3">
                 <label for="loja_id" class="form-label">Loja</label>
+                <input type="text" id="searchLojaInput" class="form-control mb-2" placeholder="Pesquisar loja...">
+                
                 <select name="loja_id" id="loja_id" class="form-select" required>
                     {% if lojas|length > 1 %}<option value="" disabled selected>-- Selecione a loja --</option>{% endif %}
                     {% for loja in lojas %}
@@ -77,6 +79,36 @@
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 
 <script>
+// SCRIPT DE FILTRO DE LOJA
+document.addEventListener('DOMContentLoaded', function() {
+    const searchInput = document.getElementById('searchLojaInput');
+    const selectLoja = document.getElementById('loja_id');
+    
+    if (searchInput && selectLoja) {
+        const originalOptions = Array.from(selectLoja.options);
+
+        searchInput.addEventListener('input', function() {
+            const searchText = this.value.toLowerCase();
+            const currentSelectedValue = selectLoja.value;
+
+            selectLoja.innerHTML = '';
+
+            originalOptions.forEach(function(option) {
+                if (option.text.toLowerCase().includes(searchText)) {
+                    selectLoja.add(option.cloneNode(true));
+                }
+            });
+
+            const newOption = Array.from(selectLoja.options).find(opt => opt.value === currentSelectedValue);
+            if (newOption) {
+                selectLoja.value = currentSelectedValue;
+            }
+        });
+    }
+});
+
+
+// SCRIPT ORIGINAL DA PÁGINA
 document.getElementById('checkinForm').addEventListener('submit', async function(event) {
     event.preventDefault();
 
