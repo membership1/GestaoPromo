@@ -1006,6 +1006,75 @@ def processar_relatorio():
     flash("Relatório processado com sucesso!", "success")
     return redirect(url_for("relatorios_avancados", grupo_id=1))
 
+@app.route('/admin/imagens', methods=['GET'])
+def ver_imagens_enviadas():
+    if 'user_type' not in session or session['user_type'] != 'master':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    cursor = db.cursor(cursor_factory=DictCursor)
+
+    # Pegar filtros da URL
+    filtro_promotora_id = request.args.get('filtro_promotora_id', '')
+    filtro_loja_id = request.args.get('filtro_loja_id', '')
+    filtro_data_inicio = request.args.get('filtro_data_inicio', '')
+    filtro_data_fim = request.args.get('filtro_data_fim', '')
+
+    # Query base
+    query = """
+        SELECT i.nota_img, i.data_hora, u.nome_completo, l.razao_social
+        FROM imagens_enviadas i
+        JOIN usuarios u ON i.usuario_id = u.id
+        JOIN lojas l ON i.loja_id = l.id
+    """
+    params = []
+    where_clauses = []
+
+    # Adicionar filtros dinamicamente
+    if filtro_promotora_id:
+        where_clauses.append("i.usuario_id = %s")
+        params.append(filtro_promotora_id)
+    if filtro_loja_id:
+        where_clauses.append("i.loja_id = %s")
+        params.append(filtro_loja_id)
+    if filtro_data_inicio:
+        where_clauses.append("i.data_hora::date >= %s")
+        params.append(filtro_data_inicio)
+    if filtro_data_fim:
+        where_clauses.append("i.data_hora::date <= %s")
+        params.append(filtro_data_fim)
+
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    query += " ORDER BY i.data_hora DESC"
+
+    cursor.execute(query, tuple(params))
+    imagens = cursor.fetchall()
+
+    # Buscar dados para os filtros
+    cursor.execute("SELECT id, nome_completo FROM usuarios WHERE tipo = 'promotora' ORDER BY nome_completo")
+    promotoras = cursor.fetchall()
+    cursor.execute("SELECT id, razao_social FROM lojas ORDER BY razao_social")
+    lojas = cursor.fetchall()
+    
+    cursor.close()
+
+    return render_template(
+        'imagens_enviadas.html',
+        title="Imagens Enviadas",
+        imagens=imagens,
+        promotoras=promotoras,
+        lojas=lojas,
+        s3_location=S3_LOCATION,
+        filtros={ # Passar os filtros de volta para o template
+            'promotora_id': filtro_promotora_id,
+            'loja_id': filtro_loja_id,
+            'data_inicio': filtro_data_inicio,
+            'data_fim': filtro_data_fim
+        }
+    )
+
 @app.route('/logout')
 def logout():
     session.clear()

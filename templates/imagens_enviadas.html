@@ -1,0 +1,63 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="mb-4"><i class="bi bi-images me-2"></i>Galeria de Imagens Enviadas</h2>
+
+<div class="card bg-body-tertiary p-3 mb-4 shadow-sm">
+    <form method="GET" action="{{ url_for('ver_imagens_enviadas') }}">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label for="filtro_promotora_id" class="form-label">Promotora</label>
+                <select name="filtro_promotora_id" id="filtro_promotora_id" class="form-select">
+                    <option value="">Todas</option>
+                    {% for p in promotoras %}
+                    <option value="{{ p.id }}" {% if filtros.promotora_id == p.id|string %}selected{% endif %}>{{ p.nome_completo }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label for="filtro_loja_id" class="form-label">Loja</label>
+                <select name="filtro_loja_id" id="filtro_loja_id" class="form-select">
+                    <option value="">Todas</option>
+                    {% for l in lojas %}
+                    <option value="{{ l.id }}" {% if filtros.loja_id == l.id|string %}selected{% endif %}>{{ l.razao_social }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label for="filtro_data_inicio" class="form-label">Data Início</label>
+                <input type="date" name="filtro_data_inicio" id="filtro_data_inicio" class="form-control" value="{{ filtros.data_inicio }}">
+            </div>
+            <div class="col-md-2">
+                <label for="filtro_data_fim" class="form-label">Data Fim</label>
+                <input type="date" name="filtro_data_fim" id="filtro_data_fim" class="form-control" value="{{ filtros.data_fim }}">
+            </div>
+            <div class="col-md-2">
+                <button type="submit" class="btn btn-primary w-100"><i class="bi bi-funnel"></i> Filtrar</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 g-4">
+    {% for imagem in imagens %}
+    <div class="col">
+        <div class="card h-100 shadow-sm">
+            <a href="{{ s3_location }}{{ imagem.nota_img }}" target="_blank">
+                <img src="{{ s3_location }}{{ imagem.nota_img }}" class="card-img-top" alt="Imagem enviada" style="height: 200px; object-fit: cover;">
+            </a>
+            <div class="card-body">
+                <p class="card-text mb-1"><strong>Promotora:</strong> {{ imagem.nome_completo }}</p>
+                <p class="card-text"><strong>Loja:</strong> {{ imagem.razao_social }}</p>
+            </div>
+            <div class="card-footer">
+                <small class="text-body-secondary">{{ imagem.data_hora.strftime('%d/%m/%Y %H:%M') }}</small>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12">
+        <p class="text-center text-body-secondary mt-5">Nenhuma imagem encontrada para os filtros selecionados.</p>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
