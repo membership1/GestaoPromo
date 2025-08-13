@@ -10,42 +10,51 @@ from waitress import serve
 from werkzeug.datastructures import MultiDict
 import psycopg2
 from psycopg2.extras import DictCursor
-import boto3 # Biblioteca da AWS
+import boto3  # AWS
 
-# --- Configuração da Aplicação ---
-# O nome 'application' é o padrão que o Elastic Beanstalk procura.
+# --- Config da Aplicação / EB ---
 application = app = Flask(__name__)
-
 app.secret_key = os.environ.get('SECRET_KEY')
 app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL')
 
-# --- Configuração do S3 ---
-S3_BUCKET = os.environ.get("S3_BUCKET")
-S3_LOCATION = os.environ.get("S3_LOCATION")
-# As credenciais são lidas automaticamente pelo Boto3 a partir das variáveis de ambiente padrão do EB
-s3 = boto3.client("s3")
+# --- Config do S3 (ajustada) ---
+AWS_REGION = os.environ.get("AWS_REGION", "sa-east-1")
+S3_BUCKET = os.environ.get("S3_BUCKET", "")
+# Se S3_LOCATION não vier, monta automaticamente com https + região
+S3_LOCATION = os.environ.get(
+    "S3_LOCATION",
+    f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/" if S3_BUCKET else ""
+).rstrip("/") + ("/" if S3_BUCKET else "")
 
-def upload_file_to_s3(file, bucket_name, acl="public-read"):
+# Usar ACL só se explicitamente habilitado (compatível com Bucket owner enforced)
+USE_S3_ACL = os.environ.get("S3_USE_ACL", "false").lower() == "true"
+
+# boto3 pegará as credenciais da role do EC2/EB automaticamente
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+def upload_file_to_s3(file_storage, bucket_name: str, key: str) -> dict:
     """
-    Função para fazer o upload de um ficheiro para um bucket S3
+    Envia o arquivo (FileStorage do Flask) para s3://{bucket_name}/{key}.
+    Retorna {"url": "<public_url>"} ou {"error": "<msg>"}.
     """
+    if not bucket_name:
+        return {"error": "S3_BUCKET não configurado."}
+
+    extra = {"ContentType": getattr(file_storage, "content_type", None) or "application/octet-stream"}
+    if USE_S3_ACL:
+        extra["ACL"] = "public-read"
+
     try:
-        s3.upload_fileobj(
-            file,
-            bucket_name,
-            file.filename,
-            ExtraArgs={
-                "ACL": acl,
-                "ContentType": file.content_type
-            }
-        )
+        print(f"[S3] Upload => s3://{bucket_name}/{key} | CT={extra['ContentType']} | ACL={extra.get('ACL')}")
+        s3.upload_fileobj(file_storage, bucket_name, key, ExtraArgs=extra)
+        public_url = f"{S3_LOCATION}{key}" if S3_LOCATION else f"https://{bucket_name}.s3.{AWS_REGION}.amazonaws.com/{key}"
+        print(f"[S3] OK: {public_url}")
+        return {"url": public_url}
     except Exception as e:
-        print("Erro no upload para o S3: ", e)
+        print(f"[S3] ERRO: s3://{bucket_name}/{key} -> {e}")
         return {"error": str(e)}
-    return {"url": f"{S3_LOCATION}{file.filename}"}
 
-
-# --- Funções de Banco de Dados (PostgreSQL) ---
+# --- Funções de Banco ---
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(app.config['DATABASE_URL'])
@@ -77,6 +86,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS campos_relatorio (
             id SERIAL PRIMARY KEY, grupo_id INTEGER NOT NULL, nome_campo TEXT NOT NULL, label_campo TEXT NOT NULL,
+            tipo TEXT DEFAULT 'texto', tamanho INTEGER DEFAULT 200,
             FOREIGN KEY (grupo_id) REFERENCES grupos(id)
         );
         CREATE TABLE IF NOT EXISTS relatorios (
@@ -146,7 +156,12 @@ def login():
 def get_promotora_lojas(usuario_id):
     db = get_db()
     cursor = db.cursor(cursor_factory=DictCursor)
-    query = "SELECT l.id, l.razao_social, l.cnpj, l.grupo_id FROM lojas l JOIN promotora_lojas pl ON l.id = pl.loja_id WHERE pl.usuario_id = %s ORDER BY l.razao_social"
+    query = """
+        SELECT l.id, l.razao_social, l.cnpj, l.grupo_id
+        FROM lojas l
+        JOIN promotora_lojas pl ON l.id = pl.loja_id
+        WHERE pl.usuario_id = %s
+        ORDER BY l.razao_social"""
     cursor.execute(query, (usuario_id,))
     lojas = cursor.fetchall()
     cursor.close()
@@ -154,7 +169,8 @@ def get_promotora_lojas(usuario_id):
 
 @app.route('/formulario', methods=['GET', 'POST'])
 def formulario():
-    if 'user_type' not in session or session['user_type'] != 'promotora': return redirect(url_for('login'))
+    if 'user_type' not in session or session['user_type'] != 'promotora':
+        return redirect(url_for('login'))
     db = get_db()
     cursor = db.cursor(cursor_factory=DictCursor)
     usuario_id = session['user_id']
@@ -164,6 +180,7 @@ def formulario():
     if not lojas_associadas:
         flash("Você não está associada a nenhuma loja. Contacte o administrador.", "warning")
         return render_template('formulario.html', user=user, lojas=[], campos=[], historico_relatorios=[])
+
     if request.method == 'POST':
         loja_id_selecionada = request.form.get('loja_id')
         if not loja_id_selecionada:
@@ -176,16 +193,21 @@ def formulario():
             return redirect(url_for('formulario'))
         cursor.execute("SELECT * FROM campos_relatorio WHERE grupo_id = %s", (loja_selecionada['grupo_id'],))
         campos = cursor.fetchall()
-        cursor.execute("INSERT INTO relatorios (usuario_id, loja_id, data, data_hora) VALUES (%s, %s, %s, %s) RETURNING id", (usuario_id, loja_id_selecionada, str(datetime.today().date()), datetime.now()))
+        cursor.execute("""INSERT INTO relatorios (usuario_id, loja_id, data, data_hora)
+                          VALUES (%s, %s, %s, %s) RETURNING id""",
+                       (usuario_id, loja_id_selecionada, str(datetime.today().date()), datetime.now()))
         relatorio_id = cursor.fetchone()['id']
         for campo in campos:
             valor_enviado = request.form.get(f"campo_{campo['id']}")
             if valor_enviado:
-                cursor.execute("INSERT INTO dados_relatorio (relatorio_id, campo_id, valor) VALUES (%s, %s, %s)", (relatorio_id, campo['id'], valor_enviado))
+                cursor.execute("""INSERT INTO dados_relatorio (relatorio_id, campo_id, valor)
+                                  VALUES (%s, %s, %s)""",
+                               (relatorio_id, campo['id'], valor_enviado))
         db.commit()
         cursor.close()
         flash("Relatório enviado com sucesso!", "success")
         return redirect(url_for('formulario'))
+
     loja_id_para_campos = request.args.get('loja_id')
     if not loja_id_para_campos and lojas_associadas:
         loja_id_para_campos = lojas_associadas[0]['id']
@@ -196,20 +218,36 @@ def formulario():
         if loja_atual and loja_atual['grupo_id']:
             cursor.execute("SELECT * FROM campos_relatorio WHERE grupo_id = %s ORDER BY id", (loja_atual['grupo_id'],))
             campos = cursor.fetchall()
-    historico_query = "SELECT r.id, r.data_hora, l.razao_social FROM relatorios r JOIN lojas l ON r.loja_id = l.id WHERE r.usuario_id = %s ORDER BY r.data_hora DESC LIMIT 10"
+
+    historico_query = """
+        SELECT r.id, r.data_hora, l.razao_social
+        FROM relatorios r
+        JOIN lojas l ON r.loja_id = l.id
+        WHERE r.usuario_id = %s
+        ORDER BY r.data_hora DESC
+        LIMIT 10"""
     cursor.execute(historico_query, (usuario_id,))
     reports = cursor.fetchall()
     historico_relatorios = []
     for report in reports:
-        cursor.execute("SELECT cr.label_campo, dr.valor FROM dados_relatorio dr JOIN campos_relatorio cr ON dr.campo_id = cr.id WHERE dr.relatorio_id = %s", (report['id'],))
+        cursor.execute("""SELECT cr.label_campo, dr.valor
+                          FROM dados_relatorio dr
+                          JOIN campos_relatorio cr ON dr.campo_id = cr.id
+                          WHERE dr.relatorio_id = %s""", (report['id'],))
         dados = cursor.fetchall()
         historico_relatorios.append({'info': report, 'dados': dados})
     cursor.close()
-    return render_template('formulario.html', user=user, lojas=lojas_associadas, campos=campos, loja_selecionada_id=int(loja_id_para_campos) if loja_id_para_campos else None, historico_relatorios=historico_relatorios, title="Relatório Diário")
+    return render_template(
+        'formulario.html',
+        user=user, lojas=lojas_associadas, campos=campos,
+        loja_selecionada_id=int(loja_id_para_campos) if loja_id_para_campos else None,
+        historico_relatorios=historico_relatorios, title="Relatório Diário"
+    )
 
 @app.route('/enviar-imagem', methods=['GET', 'POST'])
 def enviar_imagem():
-    if 'user_type' not in session or session['user_type'] != 'promotora': return redirect(url_for('login'))
+    if 'user_type' not in session or session['user_type'] != 'promotora':
+        return redirect(url_for('login'))
     db = get_db()
     cursor = db.cursor(cursor_factory=DictCursor)
     usuario_id = session['user_id']
@@ -217,28 +255,39 @@ def enviar_imagem():
     if not lojas_associadas:
         flash("Você não está associada a nenhuma loja para enviar imagens.", "warning")
         return render_template('enviar_imagem.html', lojas=[], imagens_enviadas=[])
+
     if request.method == 'POST':
         loja_id_selecionada = request.form.get('loja_id')
         imagem_file = request.files.get('imagem')
         if not loja_id_selecionada or not imagem_file:
             flash("É necessário selecionar uma loja e um arquivo.", "danger")
             return redirect(url_for('enviar_imagem'))
+
         cursor.execute("SELECT cnpj FROM lojas WHERE id = %s", (loja_id_selecionada,))
         loja_selecionada = cursor.fetchone()
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S-%f')[:-3]
         cnpj = loja_selecionada['cnpj'] if loja_selecionada and loja_selecionada['cnpj'] else 'sem_cnpj'
-        extensao = imagem_file.filename.rsplit('.', 1)[1].lower()
-        novo_nome = f"imagens_enviadas/{cnpj}_{timestamp}.{extensao}"
-        imagem_file.filename = secure_filename(novo_nome)
-        output = upload_file_to_s3(imagem_file, S3_BUCKET)
-        if "error" in output:
-            flash(f"Erro ao enviar ficheiro: {output['error']}", "danger")
+        extensao = imagem_file.filename.rsplit('.', 1)[1].lower() if '.' in imagem_file.filename else 'png'
+        key = secure_filename(f"imagens_enviadas/{cnpj}_{timestamp}.{extensao}")
+
+        # upload (sem alterar file.filename)
+        out = upload_file_to_s3(imagem_file, S3_BUCKET, key)
+        if "error" in out:
+            flash(f"Erro ao enviar ficheiro: {out['error']}", "danger")
             return redirect(url_for('enviar_imagem'))
-        cursor.execute("INSERT INTO imagens_enviadas (usuario_id, loja_id, nota_img, data_hora) VALUES (%s, %s, %s, %s)", (usuario_id, loja_id_selecionada, imagem_file.filename, datetime.now()))
+
+        cursor.execute("""INSERT INTO imagens_enviadas (usuario_id, loja_id, nota_img, data_hora)
+                          VALUES (%s, %s, %s, %s)""",
+                       (usuario_id, loja_id_selecionada, key, datetime.now()))
         db.commit()
         flash('Imagem enviada com sucesso!', 'success')
         return redirect(url_for('enviar_imagem'))
-    cursor.execute("SELECT i.*, l.razao_social FROM imagens_enviadas i JOIN lojas l ON i.loja_id = l.id WHERE i.usuario_id = %s ORDER BY i.data_hora DESC", (usuario_id,))
+
+    cursor.execute("""SELECT i.*, l.razao_social
+                      FROM imagens_enviadas i
+                      JOIN lojas l ON i.loja_id = l.id
+                      WHERE i.usuario_id = %s
+                      ORDER BY i.data_hora DESC""", (usuario_id,))
     imagens_enviadas = cursor.fetchall()
     cursor.close()
     return render_template('enviar_imagem.html', lojas=lojas_associadas, imagens_enviadas=imagens_enviadas, s3_location=S3_LOCATION, title="Enviar Imagem")
@@ -247,7 +296,6 @@ def enviar_imagem():
 def checkin():
     if 'user_type' not in session or session['user_type'] != 'promotora':
         return redirect(url_for('login'))
-    
     db = get_db()
     cursor = db.cursor(cursor_factory=DictCursor)
     usuario_id = session['user_id']
@@ -262,63 +310,49 @@ def checkin():
         try:
             loja_id_selecionada = request.form.get('loja_id')
             tipo = request.form.get('tipo')
-            
-            # --- CORREÇÃO CRÍTICA AQUI ---
-            # Trata os valores de latitude e longitude que podem vir vazios.
-            latitude_str = request.form.get('latitude')
-            longitude_str = request.form.get('longitude')
-            
-            # Converte para float se houver valor, caso contrário, define como None (será NULL no DB)
-            latitude = float(latitude_str) if latitude_str else None
-            longitude = float(longitude_str) if longitude_str else None
-            
+            lat_s = request.form.get('latitude')
+            lon_s = request.form.get('longitude')
+            latitude = float(lat_s) if lat_s else None
+            longitude = float(lon_s) if lon_s else None
             imagem_file = request.files.get('imagem')
 
-            # Adiciona logs para depuração. Estes aparecerão nos logs da sua aplicação na AWS.
-            print(f"--- NOVO CHECK-IN TENTATIVA ---")
-            print(f"Loja: {loja_id_selecionada}, Tipo: {tipo}, Lat: {latitude}, Lon: {longitude}")
-            print(f"Ficheiro de Imagem: {'Presente' if imagem_file else 'Ausente'}")
-            
+            print(f"--- CHECKIN --- loja={loja_id_selecionada} tipo={tipo} lat={latitude} lon={longitude} file={'sim' if imagem_file else 'nao'}")
+
             if not all([loja_id_selecionada, tipo, imagem_file]):
                 flash('É necessário selecionar uma loja, um tipo e uma imagem.', 'danger')
                 return redirect(url_for('checkin'))
 
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            extensao = imagem_file.filename.rsplit('.', 1)[1].lower()
-            nome_arquivo = f"checkins/{tipo}_{usuario_id}_{timestamp}.{extensao}"
-            imagem_file.filename = secure_filename(nome_arquivo)
-            
-            output = upload_file_to_s3(imagem_file, S3_BUCKET)
-            if "error" in output:
-                flash(f"Erro ao enviar imagem para o S3: {output['error']}", "danger")
+            ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            ext = imagem_file.filename.rsplit('.', 1)[1].lower() if '.' in imagem_file.filename else 'png'
+            key = secure_filename(f"checkins/{tipo}_{usuario_id}_{ts}.{ext}")
+
+            out = upload_file_to_s3(imagem_file, S3_BUCKET, key)
+            if "error" in out:
+                flash(f"Erro ao enviar imagem para o S3: {out['error']}", "danger")
                 return redirect(url_for('checkin'))
 
-            sql = """
-                INSERT INTO checkins 
-                (usuario_id, loja_id, tipo, data_hora, latitude, longitude, imagem_path) 
+            cursor.execute("""
+                INSERT INTO checkins (usuario_id, loja_id, tipo, data_hora, latitude, longitude, imagem_path)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql, (usuario_id, loja_id_selecionada, tipo, datetime.now(), latitude, longitude, imagem_file.filename))
-            
-            db.commit() # Efetiva a gravação
-            print("--- CHECK-IN GRAVADO COM SUCESSO ---")
+            """, (usuario_id, loja_id_selecionada, tipo, datetime.now(), latitude, longitude, key))
+            db.commit()
+            print(f"--- CHECKIN OK --- key={key}")
             flash(f'{tipo.capitalize()} registado com sucesso!', 'success')
 
         except Exception as e:
-            # Se ocorrer QUALQUER erro, desfaz a operação e regista o erro nos logs.
             db.rollback()
-            print(f"!!!!!!!!!! ERRO AO GRAVAR CHECKIN !!!!!!!!!!!")
-            print(f"Exceção: {e}")
-            flash(f"Ocorreu um erro inesperado ao gravar o check-in. Por favor, contacte o suporte.", "danger")
-        
+            print(f"[CHECKIN] ERRO: {e}")
+            flash("Ocorreu um erro inesperado ao gravar o check-in. Por favor, contacte o suporte.", "danger")
         finally:
-            # Garante que o cursor é sempre fechado.
             cursor.close()
 
         return redirect(url_for('checkin'))
 
-    # Lógica para o método GET
-    cursor.execute("SELECT c.*, l.razao_social FROM checkins c JOIN lojas l ON c.loja_id = l.id WHERE c.usuario_id = %s ORDER BY c.data_hora DESC", (usuario_id,))
+    cursor.execute("""SELECT c.*, l.razao_social
+                      FROM checkins c
+                      JOIN lojas l ON c.loja_id = l.id
+                      WHERE c.usuario_id = %s
+                      ORDER BY c.data_hora DESC""", (usuario_id,))
     registros = cursor.fetchall()
     cursor.close()
     return render_template('checkin.html', lojas=lojas_associadas, registros=registros, s3_location=S3_LOCATION, title="Check-in / Checkout")
@@ -355,7 +389,11 @@ def dashboard():
     checkin_labels = [r['tipo'].capitalize() for r in checkins_by_type]
     checkin_data = [r['total'] for r in checkins_by_type]
     cursor.close()
-    return render_template('dashboard.html', title="Dashboard", total_promotoras=total_promotoras, total_lojas=total_lojas, relatorios_hoje=relatorios_hoje, checkins_hoje=checkins_hoje, report_labels=report_labels, report_data=report_data, checkin_labels=checkin_labels, checkin_data=checkin_data)
+    return render_template('dashboard.html', title="Dashboard",
+                           total_promotoras=total_promotoras, total_lojas=total_lojas,
+                           relatorios_hoje=relatorios_hoje, checkins_hoje=checkins_hoje,
+                           report_labels=report_labels, report_data=report_data,
+                           checkin_labels=checkin_labels, checkin_data=checkin_data)
 
 @app.route('/admin/gerenciamento')
 def gerenciamento():
@@ -366,7 +404,12 @@ def gerenciamento():
     grupos = cursor.fetchall()
     cursor.execute("SELECT l.*, g.nome as grupo_nome FROM lojas l LEFT JOIN grupos g ON l.grupo_id = g.id ORDER BY l.razao_social")
     lojas_all = cursor.fetchall()
-    cursor.execute("SELECT u.*, COUNT(pl.loja_id) as total_lojas FROM usuarios u LEFT JOIN promotora_lojas pl ON u.id = pl.usuario_id WHERE u.tipo = 'promotora' GROUP BY u.id ORDER BY u.nome_completo")
+    cursor.execute("""SELECT u.*, COUNT(pl.loja_id) as total_lojas
+                      FROM usuarios u
+                      LEFT JOIN promotora_lojas pl ON u.id = pl.usuario_id
+                      WHERE u.tipo = 'promotora'
+                      GROUP BY u.id
+                      ORDER BY u.nome_completo""")
     promotoras = cursor.fetchall()
     cursor.close()
     return render_template('gerenciamento.html', title="Gerenciamento", lojas=lojas_all, promotoras=promotoras, grupos=grupos, lojas_all=lojas_all)
@@ -430,11 +473,9 @@ def detalhe_grupo(id):
 def add_campo(id):
     if 'user_type' not in session or session['user_type'] != 'master':
         return redirect(url_for('login'))
-
     label_campo = request.form.get('label_campo')
     tipo = request.form.get('tipo', 'texto')
     tamanho = int(request.form.get('tamanho', 200))
-
     if label_campo:
         nome_campo = label_campo.lower().replace(" ", "_")
         db = get_db()
@@ -446,7 +487,6 @@ def add_campo(id):
         db.commit()
         cursor.close()
         flash(f"Campo '{label_campo}' adicionado com sucesso.", "success")
-    
     return redirect(url_for('detalhe_grupo', id=id))
 
 @app.route('/admin/grupo/campo/delete/<int:campo_id>', methods=['POST'])
@@ -473,8 +513,11 @@ def add_loja():
     db = get_db()
     cursor = db.cursor()
     try:
-        cursor.execute("INSERT INTO lojas (razao_social, bandeira, cnpj, av_rua, cidade, uf, grupo_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                   (request.form['razao_social'], request.form['bandeira'], request.form['cnpj'], request.form['av_rua'], request.form['cidade'], request.form['uf'], request.form['grupo_id']))
+        cursor.execute("""INSERT INTO lojas
+                          (razao_social, bandeira, cnpj, av_rua, cidade, uf, grupo_id)
+                          VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                       (request.form['razao_social'], request.form['bandeira'], request.form['cnpj'],
+                        request.form['av_rua'], request.form['cidade'], request.form['uf'], request.form['grupo_id']))
         db.commit()
         flash("Loja adicionada com sucesso!", "success")
     except psycopg2.IntegrityError:
@@ -491,8 +534,11 @@ def edit_loja(id):
     cursor = db.cursor(cursor_factory=DictCursor)
     if request.method == 'POST':
         cursor_dml = db.cursor()
-        cursor_dml.execute("UPDATE lojas SET razao_social = %s, bandeira = %s, cnpj = %s, av_rua = %s, cidade = %s, uf = %s, grupo_id = %s WHERE id = %s",
-                   (request.form['razao_social'], request.form['bandeira'], request.form['cnpj'], request.form['av_rua'], request.form['cidade'], request.form['uf'], request.form['grupo_id'], id))
+        cursor_dml.execute("""UPDATE lojas
+                              SET razao_social=%s, bandeira=%s, cnpj=%s, av_rua=%s, cidade=%s, uf=%s, grupo_id=%s
+                              WHERE id=%s""",
+                           (request.form['razao_social'], request.form['bandeira'], request.form['cnpj'],
+                            request.form['av_rua'], request.form['cidade'], request.form['uf'], request.form['grupo_id'], id))
         db.commit()
         cursor_dml.close()
         flash("Loja atualizada com sucesso!", "success")
@@ -527,10 +573,11 @@ def importar_lojas():
                     av_rua=excluded.av_rua, cidade=excluded.cidade, uf=excluded.uf,
                     grupo_id=excluded.grupo_id;
             """
-            cursor.execute(sql, (row.get('RAZAO_SOCIAL'), str(row.get('CNPJ')), row.get('BANDEIRA'), row.get('ENDERECO'), row.get('CIDADE'), row.get('UF'), grupo_id))
+            cursor.execute(sql, (row.get('RAZAO_SOCIAL'), str(row.get('CNPJ')), row.get('BANDEIRA'),
+                                 row.get('ENDERECO'), row.get('CIDADE'), row.get('UF'), grupo_id))
         db.commit()
         cursor.close()
-        flash(f"Lojas importadas com sucesso para o grupo selecionado!", 'success')
+        flash("Lojas importadas com sucesso para o grupo selecionado!", 'success')
     except Exception as e:
         db.rollback()
         flash(f'Erro ao processar a planilha: {e}', 'danger')
@@ -547,28 +594,42 @@ def relatorios():
     promotoras = cursor.fetchall()
     cursor.execute("SELECT id, razao_social FROM lojas ORDER BY razao_social")
     lojas = cursor.fetchall()
+
     if request.method == 'POST':
         active_tab = 'avancado'
     else:
         active_tab = request.args.get('tab', 'diario')
-    filtros_diarios = {'grupo_id': request.args.get('filtro_grupo_id', ''), 'data': request.args.get('filtro_data', datetime.now().strftime('%Y-%m-%d'))}
+
+    filtros_diarios = {
+        'grupo_id': request.args.get('filtro_grupo_id', ''),
+        'data': request.args.get('filtro_data', datetime.now().strftime('%Y-%m-%d'))
+    }
     relatorios_diarios = []
     if filtros_diarios['grupo_id'] and filtros_diarios['data']:
-        query_diario = "SELECT r.id, r.data_hora, u.nome_completo, l.razao_social FROM relatorios r JOIN usuarios u ON r.usuario_id = u.id JOIN lojas l ON r.loja_id = l.id WHERE l.grupo_id = %s AND r.data = %s ORDER BY r.data_hora DESC"
+        query_diario = """
+            SELECT r.id, r.data_hora, u.nome_completo, l.razao_social
+            FROM relatorios r
+            JOIN usuarios u ON r.usuario_id = u.id
+            JOIN lojas l ON r.loja_id = l.id
+            WHERE l.grupo_id = %s AND r.data = %s
+            ORDER BY r.data_hora DESC"""
         cursor.execute(query_diario, (filtros_diarios['grupo_id'], filtros_diarios['data']))
         reports = cursor.fetchall()
         for report in reports:
-            cursor.execute("SELECT cr.label_campo, dr.valor FROM dados_relatorio dr JOIN campos_relatorio cr ON dr.campo_id = cr.id WHERE dr.relatorio_id = %s", (report['id'],))
+            cursor.execute("""SELECT cr.label_campo, dr.valor
+                              FROM dados_relatorio dr
+                              JOIN campos_relatorio cr ON dr.campo_id = cr.id
+                              WHERE dr.relatorio_id = %s""", (report['id'],))
             dados = cursor.fetchall()
             relatorios_diarios.append({'info': report, 'dados': dados})
+
     filtros_avancados = MultiDict(request.form) if request.method == 'POST' else MultiDict(request.args)
     campos_disponiveis = []
     grupo_id_avancado = filtros_avancados.get('grupo_id')
     if grupo_id_avancado:
         cursor.execute("SELECT id, label_campo FROM campos_relatorio WHERE grupo_id = %s ORDER BY label_campo", (grupo_id_avancado,))
         campos_disponiveis = cursor.fetchall()
-    resultados_avancados = []
-    headers = []
+    resultados_avancados, headers = [], []
     if request.method == 'POST' and filtros_avancados.getlist('campos'):
         campos_selecionados = filtros_avancados.getlist('campos')
         data_inicio = filtros_avancados.get('data_inicio')
@@ -588,32 +649,45 @@ def relatorios():
                 colunas_select.append(f"AVG(CASE WHEN dr.campo_id = {campo_id} THEN CAST(dr.valor AS REAL) END) AS \"{nome_coluna}_media\"")
                 headers.append(f"{nome_coluna} (Média)")
         if colunas_select:
-            query_base = f"SELECT u.nome_completo, l.razao_social, {', '.join(colunas_select)} FROM relatorios r JOIN usuarios u ON r.usuario_id = u.id JOIN lojas l ON r.loja_id = l.id JOIN dados_relatorio dr ON r.id = dr.relatorio_id"
-            where_clauses = ["l.grupo_id = %s", "r.data BETWEEN %s AND %s"]
+            query_base = f"""SELECT u.nome_completo, l.razao_social, {', '.join(colunas_select)}
+                             FROM relatorios r
+                             JOIN usuarios u ON r.usuario_id = u.id
+                             JOIN lojas l ON r.loja_id = l.id
+                             JOIN dados_relatorio dr ON r.id = dr.relatorio_id"""
+            where = ["l.grupo_id = %s", "r.data BETWEEN %s AND %s"]
             params = [grupo_id_avancado, data_inicio, data_fim]
             if promotora_id_avancado:
-                where_clauses.append("u.id = %s")
-                params.append(promotora_id_avancado)
+                where.append("u.id = %s"); params.append(promotora_id_avancado)
             if loja_id_avancado:
-                where_clauses.append("l.id = %s")
-                params.append(loja_id_avancado)
-            query_dinamica = query_base + " WHERE " + " AND ".join(where_clauses) + " GROUP BY u.id, l.id ORDER BY u.nome_completo"
-            cursor.execute(query_dinamica, tuple(params))
+                where.append("l.id = %s"); params.append(loja_id_avancado)
+            cursor.execute(query_base + " WHERE " + " AND ".join(where) + " GROUP BY u.id, l.id ORDER BY u.nome_completo", tuple(params))
             resultados_avancados = cursor.fetchall()
-    filtros_checkins = {'promotora_id': request.args.get('filtro_checkin_promotora_id', ''), 'loja_id': request.args.get('filtro_checkin_loja_id', ''), 'data_inicio': request.args.get('filtro_checkin_data_inicio', (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')), 'data_fim': request.args.get('filtro_checkin_data_fim', datetime.now().strftime('%Y-%m-%d'))}
-    query_checkins_base = "SELECT c.data_hora, c.tipo, c.latitude, c.longitude, c.imagem_path, u.nome_completo, l.razao_social FROM checkins c JOIN usuarios u ON c.usuario_id = u.id JOIN lojas l ON c.loja_id = l.id WHERE c.data_hora::date BETWEEN %s AND %s"
+
+    filtros_checkins = {
+        'promotora_id': request.args.get('filtro_checkin_promotora_id', ''),
+        'loja_id': request.args.get('filtro_checkin_loja_id', ''),
+        'data_inicio': request.args.get('filtro_checkin_data_inicio', (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')),
+        'data_fim': request.args.get('filtro_checkin_data_fim', datetime.now().strftime('%Y-%m-%d'))
+    }
+    query_checkins = """SELECT c.data_hora, c.tipo, c.latitude, c.longitude, c.imagem_path, u.nome_completo, l.razao_social
+                        FROM checkins c
+                        JOIN usuarios u ON c.usuario_id = u.id
+                        JOIN lojas l ON c.loja_id = l.id
+                        WHERE c.data_hora::date BETWEEN %s AND %s"""
     params_checkins = [filtros_checkins['data_inicio'], filtros_checkins['data_fim']]
     if filtros_checkins['promotora_id']:
-        query_checkins_base += " AND u.id = %s"
-        params_checkins.append(filtros_checkins['promotora_id'])
+        query_checkins += " AND u.id = %s"; params_checkins.append(filtros_checkins['promotora_id'])
     if filtros_checkins['loja_id']:
-        query_checkins_base += " AND l.id = %s"
-        params_checkins.append(filtros_checkins['loja_id'])
-    query_checkins_base += " ORDER BY c.data_hora DESC"
-    cursor.execute(query_checkins_base, tuple(params_checkins))
+        query_checkins += " AND l.id = %s"; params_checkins.append(filtros_checkins['loja_id'])
+    query_checkins += " ORDER BY c.data_hora DESC"
+    cursor.execute(query_checkins, tuple(params_checkins))
     historico_checkins = cursor.fetchall()
     cursor.close()
-    return render_template('relatorios.html', title="Relatórios", grupos=grupos, promotoras=promotoras, lojas=lojas, relatorios_diarios=relatorios_diarios, resultados_avancados=resultados_avancados, headers=headers, filtros_diarios=filtros_diarios, filtros_avancados=filtros_avancados, campos_disponiveis=campos_disponiveis, historico_checkins=historico_checkins, filtros_checkins=filtros_checkins, active_tab=active_tab, s3_location=S3_LOCATION)
+    return render_template('relatorios.html', title="Relatórios", grupos=grupos, promotoras=promotoras, lojas=lojas,
+                           relatorios_diarios=relatorios_diarios, resultados_avancados=resultados_avancados, headers=headers,
+                           filtros_diarios=filtros_diarios, filtros_avancados=filtros_avancados, campos_disponiveis=campos_disponiveis,
+                           historico_checkins=historico_checkins, filtros_checkins=filtros_checkins, active_tab=active_tab,
+                           s3_location=S3_LOCATION)
 
 @app.route('/admin/relatorios/exportar/diario')
 def exportar_relatorio_diario():
@@ -670,16 +744,13 @@ def exportar_relatorio_avancado():
         flash("Erro ao processar campos para exportação.", "danger")
         return redirect(url_for('relatorios', **request.args))
     query_base = f'SELECT u.nome_completo as "Promotora", l.razao_social as "Loja", {", ".join(colunas_select)} FROM relatorios r JOIN usuarios u ON r.usuario_id = u.id JOIN lojas l ON r.loja_id = l.id JOIN dados_relatorio dr ON r.id = dr.relatorio_id'
-    where_clauses = ["l.grupo_id = %s", "r.data BETWEEN %s AND %s"]
+    where = ["l.grupo_id = %s", "r.data BETWEEN %s AND %s"]
     params = [grupo_id_avancado, data_inicio, data_fim]
     if promotora_id_avancado:
-        where_clauses.append("u.id = %s")
-        params.append(promotora_id_avancado)
+        where.append("u.id = %s"); params.append(promotora_id_avancado)
     if loja_id_avancado:
-        where_clauses.append("l.id = %s")
-        params.append(loja_id_avancado)
-    query_dinamica = query_base + " WHERE " + " AND ".join(where_clauses) + " GROUP BY u.id, l.id ORDER BY u.nome_completo"
-    df = pd.read_sql_query(query_dinamica, db, params=tuple(params))
+        where.append("l.id = %s"); params.append(loja_id_avancado)
+    df = pd.read_sql_query(query_base + " WHERE " + " AND ".join(where) + " GROUP BY u.id, l.id ORDER BY u.nome_completo", db, params=tuple(params))
     if df.empty:
         flash("Nenhum dado encontrado para exportar com os filtros selecionados.", "info")
         return redirect(url_for('relatorios', **request.args))
@@ -692,15 +763,22 @@ def exportar_relatorio_avancado():
 def exportar_historico_checkin():
     if 'user_type' not in session or session['user_type'] != 'master': return redirect(url_for('login'))
     db = get_db()
-    filtros = {'promotora_id': request.args.get('filtro_checkin_promotora_id', ''), 'loja_id': request.args.get('filtro_checkin_loja_id', ''), 'data_inicio': request.args.get('filtro_checkin_data_inicio'), 'data_fim': request.args.get('filtro_checkin_data_fim')}
-    query_base = "SELECT c.data_hora, u.nome_completo as \"Promotora\", l.razao_social as \"Loja\", c.tipo, c.latitude, c.longitude FROM checkins c JOIN usuarios u ON c.usuario_id = u.id JOIN lojas l ON c.loja_id = l.id WHERE c.data_hora::date BETWEEN %s AND %s"
+    filtros = {
+        'promotora_id': request.args.get('filtro_checkin_promotora_id', ''),
+        'loja_id': request.args.get('filtro_checkin_loja_id', ''),
+        'data_inicio': request.args.get('filtro_checkin_data_inicio'),
+        'data_fim': request.args.get('filtro_checkin_data_fim')
+    }
+    query_base = """SELECT c.data_hora, u.nome_completo as "Promotora", l.razao_social as "Loja", c.tipo, c.latitude, c.longitude
+                    FROM checkins c
+                    JOIN usuarios u ON c.usuario_id = u.id
+                    JOIN lojas l ON c.loja_id = l.id
+                    WHERE c.data_hora::date BETWEEN %s AND %s"""
     params = [filtros['data_inicio'], filtros['data_fim']]
     if filtros['promotora_id']:
-        query_base += " AND u.id = %s"
-        params.append(filtros['promotora_id'])
+        query_base += " AND u.id = %s"; params.append(filtros['promotora_id'])
     if filtros['loja_id']:
-        query_base += " AND l.id = %s"
-        params.append(filtros['loja_id'])
+        query_base += " AND l.id = %s"; params.append(filtros['loja_id'])
     query_base += " ORDER BY c.data_hora DESC"
     df = pd.read_sql_query(query_base, db, params=tuple(params))
     if df.empty:
@@ -724,12 +802,7 @@ def api_campos_grupo(grupo_id):
     campos = cursor.fetchall()
     cursor.close()
     db.close()
-
-    return jsonify([
-        {"id": c[0], "label_campo": c[1], "tipo": c[2], "tamanho": c[3]}
-        for c in campos
-    ])
-
+    return jsonify([{"id": c[0], "label_campo": c[1], "tipo": c[2], "tamanho": c[3]} for c in campos])
 
 @app.route('/admin/performance', methods=['GET', 'POST'])
 def performance():
@@ -737,14 +810,15 @@ def performance():
     db = get_db()
     data_fim = request.form.get('data_fim', datetime.now().strftime('%Y-%m-%d'))
     data_inicio = request.form.get('data_inicio', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
-    ranking_lojas = [] 
+    ranking_lojas = []
     return render_template('performance.html', title="Relatório de Performance", ranking_lojas=ranking_lojas, data_inicio=data_inicio, data_fim=data_fim)
 
 @app.route('/admin/lojas/exportar')
 def exportar_lojas():
     if 'user_type' not in session or session['user_type'] != 'master': return redirect(url_for('login'))
     db = get_db()
-    query = 'SELECT l.razao_social, l.cnpj, l.bandeira, l.av_rua, l.cidade, l.uf, g.nome as grupo FROM lojas l LEFT JOIN grupos g ON l.grupo_id = g.id'
+    query = """SELECT l.razao_social, l.cnpj, l.bandeira, l.av_rua, l.cidade, l.uf, g.nome as grupo
+               FROM lojas l LEFT JOIN grupos g ON l.grupo_id = g.id"""
     df = pd.read_sql_query(query, db)
     df.rename(columns={'razao_social': 'RAZAO_SOCIAL','cnpj': 'CNPJ','bandeira': 'BANDEIRA','av_rua': 'ENDERECO','cidade': 'CIDADE','uf': 'UF', 'grupo': 'GRUPO'}, inplace=True)
     output = BytesIO()
@@ -756,7 +830,12 @@ def exportar_lojas():
 def exportar_promotoras():
     if 'user_type' not in session or session['user_type'] != 'master': return redirect(url_for('login'))
     db = get_db()
-    query = "SELECT u.nome_completo, u.cpf, u.telefone, u.cidade, u.uf, l.cnpj as cnpj_loja, g.nome as grupo FROM usuarios u JOIN promotora_lojas pl ON u.id = pl.usuario_id JOIN lojas l ON pl.loja_id = l.id LEFT JOIN grupos g ON l.grupo_id = g.id WHERE u.tipo = 'promotora'"
+    query = """SELECT u.nome_completo, u.cpf, u.telefone, u.cidade, u.uf, l.cnpj as cnpj_loja, g.nome as grupo
+               FROM usuarios u
+               JOIN promotora_lojas pl ON u.id = pl.usuario_id
+               JOIN lojas l ON pl.loja_id = l.id
+               LEFT JOIN grupos g ON l.grupo_id = g.id
+               WHERE u.tipo = 'promotora'"""
     df = pd.read_sql_query(query, db)
     df.rename(columns={'nome_completo': 'NOME', 'cpf': 'CPF', 'telefone': 'TELEFONE','cidade': 'CIDADE', 'uf': 'UF', 'cnpj_loja': 'CNPJ_LOJA', 'grupo': 'GRUPO'}, inplace=True)
     output = BytesIO()
@@ -773,7 +852,6 @@ def importar_promotoras():
         flash('Nenhum ficheiro selecionado', 'danger')
         return redirect(url_for('gerenciamento'))
     try:
-        df = None
         if file.filename.endswith('.csv'):
             df = pd.read_csv(file, dtype={'TELEFONE': str, 'CPF': str, 'CNPJ_LOJA': str, 'GRUPO': str})
         elif file.filename.endswith(('.xlsx', '.xls')):
@@ -791,9 +869,12 @@ def importar_promotoras():
             cpf = str(row.get('CPF', ''))
             cidade = row.get('CIDADE', '')
             uf = row.get('UF', '')
-            senha_gerada = f"hub@{telefone}"
-            senha_hash = generate_password_hash(senha_gerada)
-            sql_upsert_user = "INSERT INTO usuarios (usuario, senha_hash, tipo, nome_completo, cpf, telefone, cidade, uf) VALUES (%s, %s, 'promotora', %s, %s, %s, %s, %s) ON CONFLICT(telefone) DO UPDATE SET nome_completo=excluded.nome_completo, cpf=excluded.cpf, cidade=excluded.cidade, uf=excluded.uf RETURNING id;"
+            senha_hash = generate_password_hash(f"hub@{telefone}")
+            sql_upsert_user = """INSERT INTO usuarios (usuario, senha_hash, tipo, nome_completo, cpf, telefone, cidade, uf)
+                                 VALUES (%s, %s, 'promotora', %s, %s, %s, %s, %s)
+                                 ON CONFLICT(telefone) DO UPDATE
+                                 SET nome_completo=excluded.nome_completo, cpf=excluded.cpf, cidade=excluded.cidade, uf=excluded.uf
+                                 RETURNING id;"""
             cursor.execute(sql_upsert_user, (telefone, senha_hash, nome_completo, cpf, telefone, cidade, uf))
             promotora_id = cursor.fetchone()[0]
             cursor.execute("DELETE FROM promotora_lojas WHERE usuario_id = %s", (promotora_id,))
@@ -802,8 +883,7 @@ def importar_promotoras():
                 cnpj_loja = sub_row.get('CNPJ_LOJA')
                 if pd.notna(grupo_nome) and str(grupo_nome).strip() != '':
                     cursor.execute("SELECT id FROM lojas WHERE grupo_id = (SELECT id FROM grupos WHERE nome = %s)", (str(grupo_nome).strip(),))
-                    lojas_do_grupo = cursor.fetchall()
-                    for loja in lojas_do_grupo:
+                    for loja in cursor.fetchall():
                         cursor.execute("INSERT INTO promotora_lojas (usuario_id, loja_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (promotora_id, loja[0]))
                 elif pd.notna(cnpj_loja):
                     cursor.execute("SELECT id FROM lojas WHERE cnpj = %s", (str(cnpj_loja),))
@@ -837,7 +917,10 @@ def add_promotora():
         return redirect(url_for('gerenciamento'))
     senha_hash = generate_password_hash(f"hub@{telefone}")
     try:
-        cursor.execute("INSERT INTO usuarios (usuario, senha_hash, tipo, nome_completo, cpf, telefone, cidade, uf) VALUES (%s, %s, 'promotora', %s, %s, %s, %s, %s) RETURNING id", (telefone, senha_hash, nome_completo, cpf, telefone, cidade, uf))
+        cursor.execute("""INSERT INTO usuarios (usuario, senha_hash, tipo, nome_completo, cpf, telefone, cidade, uf)
+                          VALUES (%s, %s, 'promotora', %s, %s, %s, %s, %s)
+                          RETURNING id""",
+                       (telefone, senha_hash, nome_completo, cpf, telefone, cidade, uf))
         promotora_id = cursor.fetchone()[0]
         for loja_id in loja_ids:
             cursor.execute("INSERT INTO promotora_lojas (usuario_id, loja_id) VALUES (%s, %s)", (promotora_id, loja_id))
@@ -863,7 +946,8 @@ def edit_promotora(id):
         cidade = request.form.get('cidade')
         uf = request.form.get('uf')
         loja_ids_selecionadas = request.form.getlist('loja_ids')
-        cursor_dml.execute("UPDATE usuarios SET nome_completo=%s, cpf=%s, telefone=%s, cidade=%s, uf=%s WHERE id=%s", (nome_completo, cpf, telefone, cidade, uf, id))
+        cursor_dml.execute("UPDATE usuarios SET nome_completo=%s, cpf=%s, telefone=%s, cidade=%s, uf=%s WHERE id=%s",
+                           (nome_completo, cpf, telefone, cidade, uf, id))
         cursor_dml.execute("DELETE FROM promotora_lojas WHERE usuario_id = %s", (id,))
         for loja_id in loja_ids_selecionadas:
             cursor_dml.execute("INSERT INTO promotora_lojas (usuario_id, loja_id) VALUES (%s, %s)", (id, loja_id))
@@ -878,8 +962,7 @@ def edit_promotora(id):
     cursor.execute("SELECT * FROM grupos ORDER BY nome")
     grupos = cursor.fetchall()
     cursor.execute("SELECT loja_id FROM promotora_lojas WHERE usuario_id = %s", (id,))
-    lojas_associadas_raw = cursor.fetchall()
-    lojas_associadas_ids = [item['loja_id'] for item in lojas_associadas_raw]
+    lojas_associadas_ids = [item['loja_id'] for item in cursor.fetchall()]
     cursor.close()
     return render_template('edit_promotora.html', promotora=promotora, lojas=lojas, lojas_associadas_ids=lojas_associadas_ids, grupos=grupos)
 
@@ -904,35 +987,22 @@ def toggle_active_promotora(id):
 def relatorios_avancados(grupo_id):
     db = get_db()
     cursor = db.cursor()
-
-    # Buscar campos numéricos
     cursor.execute("SELECT id, label_campo FROM campos_relatorio WHERE grupo_id = %s AND tipo = 'numero' ORDER BY id", (grupo_id,))
     campos_numericos = [{"id": r[0], "label_campo": r[1]} for r in cursor.fetchall()]
-
-    # Buscar campos de texto
     cursor.execute("SELECT id, label_campo FROM campos_relatorio WHERE grupo_id = %s AND tipo = 'texto' ORDER BY id", (grupo_id,))
     campos_texto = [{"id": r[0], "label_campo": r[1]} for r in cursor.fetchall()]
-
-    cursor.close()
-    db.close()
-
+    cursor.close(); db.close()
     return render_template("relatorios.html", campos_numericos=campos_numericos, campos_texto=campos_texto)
-
 
 @app.route("/processar_relatorio", methods=["POST"])
 def processar_relatorio():
     campo_id = request.form.get("campo_calculo")
-    db = get_db()
-    cursor = db.cursor()
+    db = get_db(); cursor = db.cursor()
     cursor.execute("SELECT tipo FROM campos_relatorio WHERE id = %s", (campo_id,))
-    tipo = cursor.fetchone()
-    cursor.close()
-    db.close()
-
+    tipo = cursor.fetchone(); cursor.close(); db.close()
     if not tipo or tipo[0] != "numero":
         flash("O campo selecionado não é numérico e não pode ser usado em cálculos.", "danger")
-        return redirect(url_for("relatorios_avancados", grupo_id=1))  # Ajustar ID conforme necessidade
-
+        return redirect(url_for("relatorios_avancados", grupo_id=1))
     flash("Relatório processado com sucesso!", "success")
     return redirect(url_for("relatorios_avancados", grupo_id=1))
 
@@ -942,9 +1012,9 @@ def logout():
     flash('Você foi desconectado com sucesso.', 'info')
     return redirect(url_for('login'))
 
-# --- BLOCO DE INICIALIZAÇÃO E EXECUÇÃO ---
+# --- Init / Run ---
 with app.app_context():
     init_db()
-    
+
 if __name__ == '__main__':
     application.run(host='127.0.0.1', port=5000, debug=True)
