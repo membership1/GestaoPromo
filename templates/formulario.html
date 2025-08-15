@@ -36,16 +36,24 @@
                     {% endfor %}
                 </select>
             </div>
-            <script>
-                document.getElementById('loja_id_selector').addEventListener('change', function() {
-                    const selectedLojaId = this.value;
-                    if (selectedLojaId) {
-                        window.location.href = `{{ url_for('formulario') }}?loja_id=${selectedLojaId}`;
-                    }
-                });
-            </script>
+            
+            <div id="endereco-loja-container" class="mb-3" style="display: none;">
+                <div class="card bg-body-secondary">
+                    <div class="card-body p-2">
+                        <small class="card-text text-muted" id="endereco-loja-texto"></small>
+                    </div>
+                </div>
+            </div>
+
             {% elif lojas|length == 1 %}
                 <input type="hidden" name="loja_id" value="{{ lojas[0].id }}">
+                <div class="card bg-body-secondary mb-3">
+                    <div class="card-body p-2">
+                        <small class="card-text text-muted">
+                            {{ loja_selecionada_obj.av_rua or 'Endereço não informado' }}, {{ loja_selecionada_obj.cidade or '' }} - {{ loja_selecionada_obj.uf or '' }}
+                        </small>
+                    </div>
+                </div>
             {% endif %}
 
             {% if campos %}
@@ -69,7 +77,7 @@
                 </div>
             {% elif loja_selecionada_id %}
                 <div class="alert alert-warning text-center">
-                    <p class="mb-0">Não há campos de relatório configurados para o grupo da loja selecionada.</p>
+                    <p class="mb-0">Não há campos de relatório configurados for o grupo da loja selecionada.</p>
                     <p class="mb-0 small">Por favor, peça ao administrador para configurar os campos.</p>
                 </div>
             {% endif %}
@@ -114,9 +122,50 @@
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const searchInput = document.getElementById('searchLojaInput');
     const selectLoja = document.getElementById('loja_id_selector');
+    const searchInput = document.getElementById('searchLojaInput');
+    const enderecoContainer = document.getElementById('endereco-loja-container');
+    const enderecoTexto = document.getElementById('endereco-loja-texto');
+
+    // Função para buscar e exibir o endereço
+    function carregarEndereco(lojaId) {
+        if (!lojaId) {
+            enderecoContainer.style.display = 'none';
+            return;
+        }
+
+        fetch(`/api/loja/${lojaId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    enderecoContainer.style.display = 'none';
+                } else {
+                    const endereco = `${data.av_rua || 'Endereço não informado'}, ${data.cidade || ''} - ${data.uf || ''}`;
+                    enderecoTexto.textContent = endereco;
+                    enderecoContainer.style.display = 'block';
+                }
+            });
+    }
+
+    // Carrega o endereço da loja já selecionada (se houver)
+    const lojaInicialId = '{{ loja_selecionada_id }}';
+    if (lojaInicialId) {
+        carregarEndereco(lojaInicialId);
+    }
     
+    if (selectLoja){
+        selectLoja.addEventListener('change', function() {
+            const selectedLojaId = this.value;
+            if (selectedLojaId) {
+                // A página será redirecionada, e o endereço carregado no 'DOMContentLoaded'
+                window.location.href = `{{ url_for('formulario') }}?loja_id=${selectedLojaId}`;
+            } else {
+                carregarEndereco(null);
+            }
+        });
+    }
+
+    // Código original do filtro de pesquisa de loja...
     if (searchInput && selectLoja) {
         const originalOptions = Array.from(selectLoja.options);
 
@@ -132,7 +181,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             });
             
-            // Tenta manter a seleção, se ainda estiver visível
             const newOption = Array.from(selectLoja.options).find(opt => opt.value === currentSelectedValue);
             if (newOption) {
                 selectLoja.value = currentSelectedValue;

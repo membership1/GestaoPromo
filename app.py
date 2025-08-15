@@ -209,14 +209,18 @@ def formulario():
         return redirect(url_for('formulario'))
 
     loja_id_para_campos = request.args.get('loja_id')
+    loja_selecionada_obj = None # Variavel para guardar os dados da loja
     if not loja_id_para_campos and lojas_associadas:
         loja_id_para_campos = lojas_associadas[0]['id']
+    
     campos = []
     if loja_id_para_campos:
-        cursor.execute("SELECT grupo_id FROM lojas WHERE id = %s", (loja_id_para_campos,))
-        loja_atual = cursor.fetchone()
-        if loja_atual and loja_atual['grupo_id']:
-            cursor.execute("SELECT * FROM campos_relatorio WHERE grupo_id = %s ORDER BY id", (loja_atual['grupo_id'],))
+        # Busca os dados completos da loja selecionada
+        cursor.execute("SELECT * FROM lojas WHERE id = %s", (loja_id_para_campos,))
+        loja_selecionada_obj = cursor.fetchone()
+        
+        if loja_selecionada_obj and loja_selecionada_obj['grupo_id']:
+            cursor.execute("SELECT * FROM campos_relatorio WHERE grupo_id = %s ORDER BY id", (loja_selecionada_obj['grupo_id'],))
             campos = cursor.fetchall()
 
     historico_query = """
@@ -237,13 +241,28 @@ def formulario():
         dados = cursor.fetchall()
         historico_relatorios.append({'info': report, 'dados': dados})
     cursor.close()
+    
     return render_template(
         'formulario.html',
         user=user, lojas=lojas_associadas, campos=campos,
         loja_selecionada_id=int(loja_id_para_campos) if loja_id_para_campos else None,
+        loja_selecionada_obj=loja_selecionada_obj, # Passa o objeto completo da loja
         historico_relatorios=historico_relatorios, title="Relatório Diário"
     )
 
+# Adicione esta nova rota no final do arquivo app.py
+@app.route('/api/loja/<int:loja_id>')
+def api_loja_detalhes(loja_id):
+    db = get_db()
+    cursor = db.cursor(cursor_factory=DictCursor)
+    cursor.execute("SELECT av_rua, cidade, uf FROM lojas WHERE id = %s", (loja_id,))
+    loja = cursor.fetchone()
+    cursor.close()
+    if loja:
+        return jsonify(dict(loja))
+    return jsonify({'error': 'Loja não encontrada'}), 404
+    
+   
 @app.route('/enviar-imagem', methods=['GET', 'POST'])
 def enviar_imagem():
     if 'user_type' not in session or session['user_type'] != 'promotora':
