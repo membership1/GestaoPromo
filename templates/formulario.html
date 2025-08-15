@@ -77,7 +77,7 @@
                 </div>
             {% elif loja_selecionada_id %}
                 <div class="alert alert-warning text-center">
-                    <p class="mb-0">Não há campos de relatório configurados for o grupo da loja selecionada.</p>
+                    <p class="mb-0">Não há campos de relatório configurados para o grupo da loja selecionada.</p>
                     <p class="mb-0 small">Por favor, peça ao administrador para configurar os campos.</p>
                 </div>
             {% endif %}
@@ -130,7 +130,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Função para buscar e exibir o endereço
     function carregarEndereco(lojaId) {
         if (!lojaId) {
-            enderecoContainer.style.display = 'none';
+            if(enderecoContainer) enderecoContainer.style.display = 'none';
             return;
         }
 
@@ -138,26 +138,26 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(response => response.json())
             .then(data => {
                 if (data.error) {
-                    enderecoContainer.style.display = 'none';
+                    if(enderecoContainer) enderecoContainer.style.display = 'none';
                 } else {
                     const endereco = `${data.av_rua || 'Endereço não informado'}, ${data.cidade || ''} - ${data.uf || ''}`;
-                    enderecoTexto.textContent = endereco;
-                    enderecoContainer.style.display = 'block';
+                    if(enderecoTexto) enderecoTexto.textContent = endereco;
+                    if(enderecoContainer) enderecoContainer.style.display = 'block';
                 }
             });
     }
 
-    // Carrega o endereço da loja já selecionada (se houver)
+    // Carrega o endereço da loja já selecionada (se houver) ao carregar a página
     const lojaInicialId = '{{ loja_selecionada_id }}';
     if (lojaInicialId) {
         carregarEndereco(lojaInicialId);
     }
     
+    // Listener para quando a promotora seleciona uma loja (e a página recarrega)
     if (selectLoja){
         selectLoja.addEventListener('change', function() {
             const selectedLojaId = this.value;
             if (selectedLojaId) {
-                // A página será redirecionada, e o endereço carregado no 'DOMContentLoaded'
                 window.location.href = `{{ url_for('formulario') }}?loja_id=${selectedLojaId}`;
             } else {
                 carregarEndereco(null);
@@ -165,7 +165,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Código original do filtro de pesquisa de loja...
+    // Listener para o campo de busca
     if (searchInput && selectLoja) {
         const originalOptions = Array.from(selectLoja.options);
 
@@ -173,7 +173,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const searchText = this.value.toLowerCase();
             const currentSelectedValue = selectLoja.value;
 
-            selectLoja.innerHTML = '';
+            selectLoja.innerHTML = ''; // Limpa o select
 
             originalOptions.forEach(function(option) {
                 if (option.text.toLowerCase().includes(searchText)) {
@@ -181,9 +181,20 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             });
             
+            // Tenta manter a seleção anterior, se ainda estiver na lista filtrada
             const newOption = Array.from(selectLoja.options).find(opt => opt.value === currentSelectedValue);
             if (newOption) {
                 selectLoja.value = currentSelectedValue;
+            }
+
+            // *** NOVA LÓGICA ***
+            // Atualiza o endereço com base na primeira loja da lista filtrada
+            if (selectLoja.options.length > 0 && selectLoja.options[0].value) {
+                const topLojaId = selectLoja.options[0].value;
+                carregarEndereco(topLojaId);
+            } else {
+                // Se a busca não retornar nada (ou for a opção '-- Escolha...'), esconde o endereço
+                carregarEndereco(null);
             }
         });
     }
